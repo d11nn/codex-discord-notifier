@@ -23,20 +23,17 @@ CWD_RE = re.compile(r"\bcwd=([^}\s]+)")
 TERMINAL_JOB_STATUSES = {"completed", "complete", "succeeded", "success", "failed", "error", "cancelled", "canceled"}
 WAITING_HINTS = (
     "?",
-    "？",
-    "請提供",
-    "請確認",
-    "請告訴我",
-    "需要你",
-    "是否允許",
-    "是否同意",
-    "你要",
-    "要不要",
-    "哪一個",
-    "哪裡",
-    "第一個問題",
+    "please provide",
+    "please confirm",
+    "please tell me",
+    "need your",
+    "do you want",
+    "would you like",
+    "which one",
+    "where should",
+    "first question",
     "Question:",
-    "請回覆",
+    "please reply",
 )
 
 
@@ -511,7 +508,7 @@ def test_events(host: str) -> list[dict]:
             "model": "test",
             "duration_seconds": 12,
             "finished_at": now,
-            "assistant_excerpt": "這是一則測試通知：模擬超過 10 秒的 Codex turn 完成。",
+            "assistant_excerpt": "This is a test notification: a long Codex turn completed.",
         },
         {
             "key": f"test:waiting_for_user:{now}",
@@ -524,7 +521,7 @@ def test_events(host: str) -> list[dict]:
             "model": "test",
             "duration_seconds": 2,
             "finished_at": now,
-            "assistant_excerpt": "這是一則測試通知：Codex 問了一個問題，現在正在等你回答。",
+            "assistant_excerpt": "This is a test notification: Codex asked a question and is waiting for your answer.",
         },
     ]
 

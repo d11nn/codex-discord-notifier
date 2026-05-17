@@ -214,10 +214,9 @@ Sent as `Codex is waiting for you`.
 This fires when the final assistant message looks like it needs your input. Examples include messages containing:
 
 - `?`
-- `？`
-- `請提供`
-- `請確認`
-- `是否允許`
+- `please provide`
+- `please confirm`
+- `do you want`
 - `Question:`
 
 Waiting notifications bypass the duration threshold because even a short question can leave Codex blocked until you answer.

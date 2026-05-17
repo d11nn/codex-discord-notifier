@@ -15,7 +15,7 @@ def test_uuid7_ms():
 
 
 def test_waiting_detection():
-    assert notifier["looks_waiting_for_user"]("請你確認：收到通知了嗎？")
+    assert notifier["looks_waiting_for_user"]("Please confirm: did you receive the notification?")
     assert notifier["looks_waiting_for_user"]("Question: choose one.")
     assert not notifier["looks_waiting_for_user"]("Deployment completed successfully.")
 
