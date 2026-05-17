@@ -26,7 +26,17 @@ Discord webhooks are the right primitive for this project:
 
 Webhooks post into a Discord channel. They do not send direct messages. If you want private notifications, create a private channel or a personal Discord server, then create the webhook there.
 
+## Requirements
+
+- Codex Desktop or Codex CLI state under `~/.codex`
+- Python 3
+- outbound HTTPS access to Discord's webhook API
+
+No `pip install` step is required. The daemon uses only Python standard library modules, including `sqlite3`, `urllib`, `json`, `pathlib`, and `socket`.
+
 ## Quick Start
+
+### Linux
 
 Clone and install:
 
@@ -74,6 +84,70 @@ If you want the user service to keep running after SSH logout:
 ```bash
 loginctl enable-linger "$USER"
 ```
+
+### macOS
+
+macOS is supported for the notifier runtime because the daemon uses only Python 3 standard library modules, SQLite files, and outgoing HTTPS webhook calls.
+
+If `python3` is not available, install it first:
+
+```bash
+xcode-select --install
+```
+
+If that does not provide Python 3 on your macOS version, install Python from [python.org](https://www.python.org/downloads/macos/).
+
+Install the binary and env file:
+
+```bash
+mkdir -p ~/bin ~/.config/codex-discord-notifier ~/Library/LaunchAgents
+install -m 0755 bin/codex-discord-notifier ~/bin/codex-discord-notifier
+install -m 0600 env.example ~/.config/codex-discord-notifier/env
+```
+
+Paste your Discord webhook URL:
+
+```bash
+nano ~/.config/codex-discord-notifier/env
+```
+
+If your Codex directory is not `~/.codex`, set it explicitly:
+
+```bash
+CODEX_NOTIFY_CODEX_DIR="$HOME/.codex"
+```
+
+Install the launchd agent:
+
+```bash
+sed "s#/Users/YOUR_USER#$HOME#g" launchd/com.d11nn.codex-discord-notifier.plist \
+  > ~/Library/LaunchAgents/com.d11nn.codex-discord-notifier.plist
+launchctl unload ~/Library/LaunchAgents/com.d11nn.codex-discord-notifier.plist 2>/dev/null || true
+launchctl load ~/Library/LaunchAgents/com.d11nn.codex-discord-notifier.plist
+launchctl start com.d11nn.codex-discord-notifier
+```
+
+View logs:
+
+```bash
+tail -f /tmp/codex-discord-notifier.out.log /tmp/codex-discord-notifier.err.log
+```
+
+Send a test notification:
+
+```bash
+~/bin/codex-discord-notifier --send-test
+```
+
+### Windows
+
+Windows is not yet a verified target. The Python daemon itself is portable, but production support still needs validation for:
+
+- Codex Desktop's Windows state directory layout
+- service installation strategy, such as Task Scheduler or NSSM
+- path handling for rollout JSONL files
+
+Pull requests for Windows support are welcome, but the current documented production paths are Linux and macOS.
 
 ## Test It
 
@@ -218,6 +292,13 @@ Uninstall the binary and service:
 
 The uninstall script preserves config and state so you do not lose your webhook or deduplication history.
 
+On macOS, unload the launchd agent:
+
+```bash
+launchctl unload ~/Library/LaunchAgents/com.d11nn.codex-discord-notifier.plist
+rm -f ~/Library/LaunchAgents/com.d11nn.codex-discord-notifier.plist
+```
+
 ## Production Notes
 
 This project is intentionally dependency-free: it uses Python 3 standard library modules only.
@@ -235,4 +316,3 @@ Production behavior built in:
 ## License
 
 Apache License 2.0. See [LICENSE](LICENSE).
-
