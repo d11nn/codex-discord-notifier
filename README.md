@@ -36,8 +36,6 @@ No `pip install` step is required. The daemon uses only Python standard library 
 
 ## Quick Start
 
-### Linux
-
 Clone and install:
 
 ```bash
@@ -45,6 +43,11 @@ git clone https://github.com/d11nn/codex-discord-notifier.git
 cd codex-discord-notifier
 ./install.sh
 ```
+
+The installer detects your OS:
+
+- Linux: installs a systemd user service.
+- macOS: installs a launchd LaunchAgent.
 
 Create a Discord webhook:
 
@@ -72,11 +75,19 @@ CODEX_NOTIFY_HOST="VM1"
 CODEX_NOTIFY_MENTION="@here"
 ```
 
-Start the notifier:
+Send a test notification:
 
 ```bash
-systemctl --user daemon-reload
-systemctl --user enable --now codex-discord-notifier.service
+codex-discord-notifier --send-test
+```
+
+### Linux
+
+Linux uses a systemd user service.
+
+Check status:
+
+```bash
 systemctl --user status codex-discord-notifier.service
 ```
 
@@ -88,7 +99,7 @@ loginctl enable-linger "$USER"
 
 ### macOS
 
-macOS is supported for the notifier runtime because the daemon uses only Python 3 standard library modules, SQLite files, and outgoing HTTPS webhook calls.
+macOS uses a launchd LaunchAgent.
 
 If `python3` is not available, install it first:
 
@@ -98,34 +109,10 @@ xcode-select --install
 
 If that does not provide Python 3 on your macOS version, install Python from [python.org](https://www.python.org/downloads/macos/).
 
-Install the binary and env file:
+Check status:
 
 ```bash
-mkdir -p ~/bin ~/.config/codex-discord-notifier ~/Library/LaunchAgents
-install -m 0755 bin/codex-discord-notifier ~/bin/codex-discord-notifier
-install -m 0600 env.example ~/.config/codex-discord-notifier/env
-```
-
-Paste your Discord webhook URL:
-
-```bash
-nano ~/.config/codex-discord-notifier/env
-```
-
-If your Codex directory is not `~/.codex`, set it explicitly:
-
-```bash
-CODEX_NOTIFY_CODEX_DIR="$HOME/.codex"
-```
-
-Install the launchd agent:
-
-```bash
-sed "s#/Users/YOUR_USER#$HOME#g" launchd/com.d11nn.codex-discord-notifier.plist \
-  > ~/Library/LaunchAgents/com.d11nn.codex-discord-notifier.plist
-launchctl unload ~/Library/LaunchAgents/com.d11nn.codex-discord-notifier.plist 2>/dev/null || true
-launchctl load ~/Library/LaunchAgents/com.d11nn.codex-discord-notifier.plist
-launchctl start com.d11nn.codex-discord-notifier
+launchctl list | grep com.d11nn.codex-discord-notifier
 ```
 
 View logs:
@@ -134,10 +121,16 @@ View logs:
 tail -f /tmp/codex-discord-notifier.out.log /tmp/codex-discord-notifier.err.log
 ```
 
-Send a test notification:
+If your Codex directory is not `~/.codex`, set it explicitly in `~/.config/codex-discord-notifier/env`:
 
 ```bash
-~/bin/codex-discord-notifier --send-test
+CODEX_NOTIFY_CODEX_DIR="$HOME/.codex"
+```
+
+### Uninstall
+
+```bash
+./uninstall.sh
 ```
 
 ### Windows
@@ -277,22 +270,42 @@ Set `CODEX_NOTIFY_MENTION=""` to disable all pings:
 
 ## Operations
 
-View status:
+View Linux status:
 
 ```bash
 systemctl --user status codex-discord-notifier.service
 ```
 
-View logs:
+View Linux logs:
 
 ```bash
 journalctl --user -u codex-discord-notifier.service -f
 ```
 
-Restart after editing config:
+Restart Linux service after editing config:
 
 ```bash
 systemctl --user restart codex-discord-notifier.service
+```
+
+View macOS status:
+
+```bash
+launchctl list | grep com.d11nn.codex-discord-notifier
+```
+
+View macOS logs:
+
+```bash
+tail -f /tmp/codex-discord-notifier.out.log /tmp/codex-discord-notifier.err.log
+```
+
+Restart macOS agent after editing config:
+
+```bash
+launchctl unload ~/Library/LaunchAgents/com.d11nn.codex-discord-notifier.plist
+launchctl load ~/Library/LaunchAgents/com.d11nn.codex-discord-notifier.plist
+launchctl start com.d11nn.codex-discord-notifier
 ```
 
 Uninstall the binary and service:
@@ -302,13 +315,6 @@ Uninstall the binary and service:
 ```
 
 The uninstall script preserves config and state so you do not lose your webhook or deduplication history.
-
-On macOS, unload the launchd agent:
-
-```bash
-launchctl unload ~/Library/LaunchAgents/com.d11nn.codex-discord-notifier.plist
-rm -f ~/Library/LaunchAgents/com.d11nn.codex-discord-notifier.plist
-```
 
 ## Production Notes
 
