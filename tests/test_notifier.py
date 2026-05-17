@@ -14,6 +14,13 @@ def test_uuid7_ms():
     assert notifier["uuid7_ms"](value) == int("019e372f9041", 16)
 
 
+def test_startup_guard_uses_completion_time():
+    assert notifier["completed_before_startup"](1_000, 2_000)
+    assert not notifier["completed_before_startup"](2_000, 2_000)
+    assert not notifier["completed_before_startup"](3_000, 2_000)
+    assert not notifier["completed_before_startup"](1_000, None)
+
+
 def test_waiting_detection():
     assert notifier["looks_waiting_for_user"]("Please confirm: did you receive the notification?")
     assert notifier["looks_waiting_for_user"]("Question: choose one.")

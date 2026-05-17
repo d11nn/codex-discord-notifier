@@ -92,6 +92,10 @@ def uuid7_ms(value: str) -> int | None:
         return None
 
 
+def completed_before_startup(finished_ms: int, startup_ms: int | None) -> bool:
+    return startup_ms is not None and finished_ms < startup_ms
+
+
 def iso_utc(epoch_seconds: int | float | None) -> str:
     if epoch_seconds is None:
         return "unknown"
@@ -259,7 +263,7 @@ def collect_turn_events(
     codex_dir: Path,
     state: dict,
     min_seconds: int,
-    ignore_turns_started_before_ms: int | None = None,
+    ignore_completed_before_ms: int | None = None,
 ) -> list[dict]:
     logs_db = codex_dir / "logs_2.sqlite"
     state_db = codex_dir / "state_5.sqlite"
@@ -319,14 +323,11 @@ def collect_turn_events(
         if key in state.get("sent_keys", {}) or key in emitted_keys:
             continue
 
-        started_ms = uuid7_ms(turn_id) if turn_id else None
-        if (
-            started_ms is not None
-            and ignore_turns_started_before_ms is not None
-            and started_ms < ignore_turns_started_before_ms
-        ):
-            continue
         finished_ms = int(row["ts"]) * 1000
+        if completed_before_startup(finished_ms, ignore_completed_before_ms):
+            continue
+
+        started_ms = uuid7_ms(turn_id) if turn_id else None
         duration_seconds = None
         assistant_text = last_final_text_by_turn.get(turn_key, "")
         if not assistant_text:
@@ -533,11 +534,11 @@ def poll_once(
     dry_run: bool,
     min_seconds: int,
     host: str,
-    ignore_turns_started_before_ms: int | None = None,
+    ignore_completed_before_ms: int | None = None,
 ) -> int:
     state = init_state_if_needed(codex_dir, state_path)
     events = []
-    events.extend(collect_turn_events(codex_dir, state, min_seconds, ignore_turns_started_before_ms))
+    events.extend(collect_turn_events(codex_dir, state, min_seconds, ignore_completed_before_ms))
     events.extend(collect_agent_job_events(codex_dir, state, min_seconds))
 
     sent_count = 0
