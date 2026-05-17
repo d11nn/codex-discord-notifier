@@ -4,6 +4,8 @@ Get a Discord notification when a local Codex turn finishes or when Codex is wai
 
 This is for the common failure mode where Codex is doing real work in another window, finishes, asks a question, or waits for confirmation, and you miss it.
 
+It is especially useful for remote Codex workflows. Codex Mobile and Codex Desktop can connect to a remote VM through Application Connection, but work that finishes on the remote VM does not necessarily trigger a local desktop/mobile notification. The same gap exists when you run Codex CLI directly on a remote VM. This notifier runs beside Codex on that machine and sends Discord notifications when the remote work needs your attention.
+
 ## What It Does
 
 Codex Discord Notifier runs as a small user-level daemon on the same machine as Codex. It watches Codex's local SQLite/log state and sends a Discord webhook message when:
