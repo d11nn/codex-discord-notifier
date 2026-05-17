@@ -1,0 +1,13 @@
+[Unit]
+Description=Codex Discord finish notifier
+After=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.config/codex-discord-notifier/env
+ExecStart=%h/bin/codex-discord-notifier
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

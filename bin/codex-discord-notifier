@@ -1,0 +1,622 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+import argparse
+import json
+import os
+import re
+import socket
+import sqlite3
+import sys
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+
+DEFAULT_ENV_PATH = Path.home() / ".config/codex-discord-notifier/env"
+DEFAULT_STATE_PATH = Path.home() / ".local/state/codex-discord-notifier/state.json"
+DEFAULT_CODEX_DIR = Path.home() / ".codex"
+
+TURN_ID_RE = re.compile(r"turn\.id=([0-9a-f-]{36})")
+MODEL_RE = re.compile(r"\bmodel=([^\s}]+)")
+CWD_RE = re.compile(r"\bcwd=([^}\s]+)")
+TERMINAL_JOB_STATUSES = {"completed", "complete", "succeeded", "success", "failed", "error", "cancelled", "canceled"}
+WAITING_HINTS = (
+    "?",
+    "？",
+    "請提供",
+    "請確認",
+    "請告訴我",
+    "需要你",
+    "是否允許",
+    "是否同意",
+    "你要",
+    "要不要",
+    "哪一個",
+    "哪裡",
+    "第一個問題",
+    "Question:",
+    "請回覆",
+)
+
+
+def load_env_file(path: Path) -> None:
+    if not path.exists():
+        return
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        os.environ.setdefault(key, value)
+
+
+def env_int(name: str, default: int) -> int:
+    value = os.environ.get(name)
+    if not value:
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        return default
+
+
+def sqlite_ro(path: Path) -> sqlite3.Connection:
+    con = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=1.0)
+    con.row_factory = sqlite3.Row
+    return con
+
+
+def read_state(path: Path) -> dict:
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def write_state(path: Path, state: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(state, indent=2, sort_keys=True), encoding="utf-8")
+    tmp.replace(path)
+
+
+def uuid7_ms(value: str) -> int | None:
+    compact = value.replace("-", "")
+    if len(compact) < 12:
+        return None
+    try:
+        return int(compact[:12], 16)
+    except ValueError:
+        return None
+
+
+def iso_utc(epoch_seconds: int | float | None) -> str:
+    if epoch_seconds is None:
+        return "unknown"
+    return time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(epoch_seconds))
+
+
+def fetch_thread_info(state_db: Path, thread_id: str | None) -> dict:
+    if not thread_id or not state_db.exists():
+        return {}
+    try:
+        with sqlite_ro(state_db) as con:
+            row = con.execute(
+                "select id, title, cwd, model, reasoning_effort, thread_source, source, rollout_path from threads where id = ?",
+                (thread_id,),
+            ).fetchone()
+    except sqlite3.Error:
+        return {}
+    return dict(row) if row else {}
+
+
+def should_ignore_thread(info: dict, body: str = "") -> bool:
+    model = str(info.get("model") or "")
+    thread_source = str(info.get("thread_source") or "")
+    source = str(info.get("source") or "")
+    title = str(info.get("title") or "")
+    if model == "codex-auto-review":
+        return True
+    if thread_source == "subagent":
+        return True
+    if "guardian" in source:
+        return True
+    if title.startswith("The following is the Codex agent history whose request action you are assessing."):
+        return True
+    if "model=codex-auto-review" in body:
+        return True
+    return False
+
+
+def parse_websocket_event(body: str) -> dict | None:
+    marker = "websocket event: "
+    idx = body.find(marker)
+    if idx < 0:
+        return None
+    try:
+        return json.loads(body[idx + len(marker) :])
+    except json.JSONDecodeError:
+        return None
+
+
+def assistant_message_from_event(event: dict | None) -> tuple[str, str]:
+    if not event or event.get("type") != "response.output_item.done":
+        return "", ""
+    item = event.get("item") or {}
+    if item.get("type") != "message" or item.get("role") != "assistant":
+        return "", ""
+    chunks = []
+    for part in item.get("content") or []:
+        if part.get("type") == "output_text" and part.get("text"):
+            chunks.append(part["text"])
+    return "\n".join(chunks).strip(), str(item.get("phase") or "")
+
+
+def looks_waiting_for_user(text: str) -> bool:
+    if not text:
+        return False
+    compact = " ".join(text.split())
+    return any(hint in compact for hint in WAITING_HINTS)
+
+
+def final_message_from_rollout(path_value: str | None, turn_id: str | None) -> str:
+    if not path_value:
+        return ""
+    path = Path(path_value)
+    if not path.exists():
+        return ""
+    try:
+        with path.open("rb") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            f.seek(max(0, size - 2_000_000))
+            data = f.read().decode("utf-8", errors="replace")
+    except OSError:
+        return ""
+
+    if turn_id:
+        for line in reversed(data.splitlines()):
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if obj.get("type") != "event_msg":
+                continue
+            payload = obj.get("payload") or {}
+            if payload.get("type") != "task_complete":
+                continue
+            if payload.get("turn_id") != turn_id:
+                continue
+            return str(payload.get("last_agent_message") or "").strip()
+
+    for line in reversed(data.splitlines()):
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if obj.get("type") != "response_item":
+            continue
+        payload = obj.get("payload") or {}
+        if payload.get("type") != "message":
+            continue
+        if payload.get("role") != "assistant" or payload.get("phase") not in {"final", "final_answer"}:
+            continue
+        chunks = []
+        for part in payload.get("content") or []:
+            if part.get("type") == "output_text" and part.get("text"):
+                chunks.append(part["text"])
+        return "\n".join(chunks).strip()
+    return ""
+
+
+def current_completed_jobs(state_db: Path) -> dict:
+    seen = {}
+    if not state_db.exists():
+        return seen
+    try:
+        with sqlite_ro(state_db) as con:
+            for row in con.execute(
+                "select id, status, completed_at from agent_jobs "
+                "where completed_at is not null or lower(status) in (%s)"
+                % ",".join("?" for _ in TERMINAL_JOB_STATUSES),
+                tuple(TERMINAL_JOB_STATUSES),
+            ):
+                seen[row["id"]] = row["completed_at"] or row["status"]
+    except sqlite3.Error:
+        return seen
+    return seen
+
+
+def init_state_if_needed(codex_dir: Path, state_path: Path) -> dict:
+    state = read_state(state_path)
+    if state.get("initialized"):
+        return state
+
+    logs_db = codex_dir / "logs_2.sqlite"
+    state_db = codex_dir / "state_5.sqlite"
+    max_log_id = 0
+    if logs_db.exists():
+        try:
+            with sqlite_ro(logs_db) as con:
+                row = con.execute("select coalesce(max(id), 0) as max_id from logs").fetchone()
+                max_log_id = int(row["max_id"])
+        except sqlite3.Error:
+            max_log_id = 0
+
+    state = {
+        "initialized": True,
+        "last_log_id": max_log_id,
+        "seen_agent_jobs": current_completed_jobs(state_db),
+        "sent_keys": {},
+    }
+    write_state(state_path, state)
+    return state
+
+
+def collect_turn_events(
+    codex_dir: Path,
+    state: dict,
+    min_seconds: int,
+    ignore_turns_started_before_ms: int | None = None,
+) -> list[dict]:
+    logs_db = codex_dir / "logs_2.sqlite"
+    state_db = codex_dir / "state_5.sqlite"
+    if not logs_db.exists():
+        return []
+
+    last_log_id = int(state.get("last_log_id", 0))
+    events = []
+    last_final_text_by_turn = {}
+    emitted_keys = set()
+    max_seen = last_log_id
+
+    try:
+        with sqlite_ro(logs_db) as con:
+            rows = con.execute(
+                "select id, ts, target, thread_id, feedback_log_body from logs "
+                "where id > ? "
+                "and ("
+                "  (target = 'codex_api::endpoint::responses_websocket' "
+                "   and feedback_log_body like '%\"type\":\"response.output_item.done\"%' "
+                "   and feedback_log_body like '%\"type\":\"message\"%' "
+                "   and feedback_log_body like '%\"role\":\"assistant\"%') "
+                "  or "
+                "  (target = 'codex_otel.trace_safe' "
+                "   and feedback_log_body like '%event.kind=response.completed%' "
+                "   and feedback_log_body like '%success=\"true\"%')"
+                ") "
+                "order by id asc",
+                (last_log_id,),
+            ).fetchall()
+    except sqlite3.Error as exc:
+        print(f"sqlite logs read failed: {exc}", file=sys.stderr)
+        return []
+
+    for row in rows:
+        max_seen = max(max_seen, int(row["id"]))
+        body = row["feedback_log_body"] or ""
+        turn_match = TURN_ID_RE.search(body)
+        turn_id = turn_match.group(1) if turn_match else None
+        thread_id = row["thread_id"]
+        turn_key = f"{thread_id}:{turn_id or row['id']}"
+
+        text, phase = assistant_message_from_event(parse_websocket_event(body))
+        if text and turn_id:
+            if phase in {"final", "final_answer"}:
+                last_final_text_by_turn[turn_key] = text
+            continue
+
+        if "event.kind=response.completed" not in body:
+            continue
+
+        info = fetch_thread_info(state_db, thread_id)
+        if should_ignore_thread(info, body):
+            continue
+
+        key = f"turn:{thread_id}:{turn_id or row['id']}"
+        if key in state.get("sent_keys", {}) or key in emitted_keys:
+            continue
+
+        started_ms = uuid7_ms(turn_id) if turn_id else None
+        if (
+            started_ms is not None
+            and ignore_turns_started_before_ms is not None
+            and started_ms < ignore_turns_started_before_ms
+        ):
+            continue
+        finished_ms = int(row["ts"]) * 1000
+        duration_seconds = None
+        assistant_text = last_final_text_by_turn.get(turn_key, "")
+        if not assistant_text:
+            assistant_text = final_message_from_rollout(info.get("rollout_path"), turn_id)
+        if not assistant_text:
+            continue
+        waiting_for_user = looks_waiting_for_user(assistant_text)
+        if started_ms is not None:
+            duration_seconds = max(0, round((finished_ms - started_ms) / 1000))
+            if duration_seconds < min_seconds and not waiting_for_user:
+                continue
+
+        model_match = MODEL_RE.search(body)
+        cwd_match = CWD_RE.search(body)
+        events.append(
+            {
+                "key": key,
+                "kind": "turn_waiting" if waiting_for_user else "turn",
+                "status": "waiting_for_user" if waiting_for_user else "completed",
+                "thread_id": thread_id or "unknown",
+                "turn_id": turn_id or "unknown",
+                "title": info.get("title") or "(untitled Codex thread)",
+                "cwd": info.get("cwd") or (cwd_match.group(1) if cwd_match else "unknown"),
+                "model": info.get("model") or (model_match.group(1) if model_match else "unknown"),
+                "duration_seconds": duration_seconds,
+                "finished_at": int(row["ts"]),
+                "assistant_excerpt": assistant_text[:500],
+            }
+        )
+        emitted_keys.add(key)
+
+    state["last_log_id"] = max_seen
+    return events
+
+
+def collect_agent_job_events(codex_dir: Path, state: dict, min_seconds: int) -> list[dict]:
+    state_db = codex_dir / "state_5.sqlite"
+    if not state_db.exists():
+        return []
+
+    seen = state.setdefault("seen_agent_jobs", {})
+    events = []
+    placeholders = ",".join("?" for _ in TERMINAL_JOB_STATUSES)
+    try:
+        with sqlite_ro(state_db) as con:
+            rows = con.execute(
+                "select id, name, status, created_at, started_at, completed_at, updated_at, last_error "
+                "from agent_jobs "
+                f"where completed_at is not null or lower(status) in ({placeholders}) "
+                "order by updated_at asc",
+                tuple(TERMINAL_JOB_STATUSES),
+            ).fetchall()
+    except sqlite3.Error as exc:
+        print(f"sqlite agent_jobs read failed: {exc}", file=sys.stderr)
+        return []
+
+    for row in rows:
+        marker = row["completed_at"] or row["status"]
+        if seen.get(row["id"]) == marker:
+            continue
+        seen[row["id"]] = marker
+
+        started = row["started_at"] or row["created_at"]
+        finished = row["completed_at"] or row["updated_at"]
+        duration_seconds = None
+        if started and finished:
+            duration_seconds = max(0, int(finished) - int(started))
+            if duration_seconds < min_seconds:
+                continue
+
+        key = f"agent_job:{row['id']}:{marker}"
+        if key in state.get("sent_keys", {}):
+            continue
+
+        events.append(
+            {
+                "key": key,
+                "kind": "agent_job",
+                "status": row["status"],
+                "thread_id": "n/a",
+                "turn_id": "n/a",
+                "title": row["name"],
+                "cwd": "n/a",
+                "model": "n/a",
+                "duration_seconds": duration_seconds,
+                "finished_at": finished,
+                "error": row["last_error"],
+            }
+        )
+
+    return events
+
+
+def prune_sent_keys(state: dict, keep: int = 500) -> None:
+    sent = state.setdefault("sent_keys", {})
+    if len(sent) <= keep:
+        return
+    newest = sorted(sent.items(), key=lambda item: item[1], reverse=True)[:keep]
+    state["sent_keys"] = dict(newest)
+
+
+def build_payload(event: dict, host: str) -> dict:
+    duration = "unknown"
+    if event.get("duration_seconds") is not None:
+        duration = f"{event['duration_seconds']}s"
+
+    fields = [
+        {"name": "Host", "value": host, "inline": True},
+        {"name": "Kind", "value": event["kind"], "inline": True},
+        {"name": "Status", "value": event["status"], "inline": True},
+        {"name": "Duration", "value": duration, "inline": True},
+        {"name": "Model", "value": str(event.get("model") or "unknown"), "inline": True},
+        {"name": "Finished", "value": iso_utc(event.get("finished_at")), "inline": True},
+        {"name": "CWD", "value": f"`{event.get('cwd') or 'unknown'}`", "inline": False},
+        {"name": "Thread ID", "value": f"`{event.get('thread_id') or 'unknown'}`", "inline": False},
+    ]
+    if event.get("error"):
+        fields.append({"name": "Error", "value": str(event["error"])[:900], "inline": False})
+    if event.get("assistant_excerpt"):
+        fields.append({"name": "Assistant", "value": str(event["assistant_excerpt"])[:900], "inline": False})
+
+    return {
+        "username": "Codex Finish Notifier",
+        "allowed_mentions": {"parse": []},
+        "embeds": [
+            {
+                "title": "Codex is waiting for you" if event.get("status") == "waiting_for_user" else "Codex job finished",
+                "description": str(event.get("title") or "(untitled)")[:300],
+                "color": 16776960
+                if event.get("status") == "waiting_for_user"
+                else 5763719
+                if event.get("status") not in {"failed", "error"}
+                else 15548997,
+                "fields": fields,
+            }
+        ],
+    }
+
+
+def post_webhook(url: str, payload: dict, dry_run: bool) -> bool:
+    if dry_run:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return True
+
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=data,
+        headers={"Content-Type": "application/json", "User-Agent": "codex-discord-notifier/1.0"},
+        method="POST",
+    )
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                return 200 <= resp.status < 300
+        except urllib.error.HTTPError as exc:
+            if exc.code == 429:
+                time.sleep(2 + attempt)
+                continue
+            print(f"discord webhook failed: HTTP {exc.code} {exc.reason}", file=sys.stderr)
+            return False
+        except urllib.error.URLError as exc:
+            print(f"discord webhook failed: {exc}", file=sys.stderr)
+            time.sleep(2 + attempt)
+    return False
+
+
+def test_events(host: str) -> list[dict]:
+    now = int(time.time())
+    return [
+        {
+            "key": f"test:long_turn:{now}",
+            "kind": "turn",
+            "status": "completed",
+            "thread_id": "test-thread-long-turn",
+            "turn_id": "test-turn-long-turn",
+            "title": "Webhook test: long Codex turn",
+            "cwd": "/home/ubuntu",
+            "model": "test",
+            "duration_seconds": 12,
+            "finished_at": now,
+            "assistant_excerpt": "這是一則測試通知：模擬超過 10 秒的 Codex turn 完成。",
+        },
+        {
+            "key": f"test:waiting_for_user:{now}",
+            "kind": "turn_waiting",
+            "status": "waiting_for_user",
+            "thread_id": "test-thread-waiting",
+            "turn_id": "test-turn-waiting",
+            "title": "Webhook test: Codex waiting for user",
+            "cwd": "/home/ubuntu",
+            "model": "test",
+            "duration_seconds": 2,
+            "finished_at": now,
+            "assistant_excerpt": "這是一則測試通知：Codex 問了一個問題，現在正在等你回答。",
+        },
+    ]
+
+
+def poll_once(
+    codex_dir: Path,
+    state_path: Path,
+    webhook_url: str,
+    dry_run: bool,
+    min_seconds: int,
+    host: str,
+    ignore_turns_started_before_ms: int | None = None,
+) -> int:
+    state = init_state_if_needed(codex_dir, state_path)
+    events = []
+    events.extend(collect_turn_events(codex_dir, state, min_seconds, ignore_turns_started_before_ms))
+    events.extend(collect_agent_job_events(codex_dir, state, min_seconds))
+
+    sent_count = 0
+    for event in events:
+        payload = build_payload(event, host)
+        if post_webhook(webhook_url, payload, dry_run):
+            state.setdefault("sent_keys", {})[event["key"]] = int(time.time())
+            sent_count += 1
+
+    prune_sent_keys(state)
+    if not dry_run:
+        write_state(state_path, state)
+    return sent_count
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Send Discord notifications when Codex turns/jobs finish.")
+    parser.add_argument("--once", action="store_true", help="poll once and exit")
+    parser.add_argument("--dry-run", action="store_true", help="print Discord payload instead of sending")
+    parser.add_argument("--init-state", action="store_true", help="initialize state to current Codex DB positions and exit")
+    parser.add_argument("--send-test", action="store_true", help="send two test Discord notifications and exit")
+    args = parser.parse_args()
+
+    load_env_file(DEFAULT_ENV_PATH)
+
+    codex_dir = Path(os.environ.get("CODEX_NOTIFY_CODEX_DIR", str(DEFAULT_CODEX_DIR))).expanduser()
+    state_path = Path(os.environ.get("CODEX_NOTIFY_STATE_PATH", str(DEFAULT_STATE_PATH))).expanduser()
+    webhook_url = os.environ.get("DISCORD_WEBHOOK_URL", "")
+    dry_run = args.dry_run or os.environ.get("CODEX_NOTIFY_DRY_RUN") == "1"
+    poll_seconds = max(1, env_int("CODEX_NOTIFY_POLL_SECONDS", 2))
+    min_seconds = max(0, env_int("CODEX_NOTIFY_MIN_SECONDS", 5))
+    host = os.environ.get("CODEX_NOTIFY_HOST") or socket.gethostname()
+    startup_ms = int(time.time() * 1000)
+
+    if args.init_state:
+        init_state_if_needed(codex_dir, state_path)
+        print(f"initialized notifier state at {state_path}")
+        return 0
+
+    if not webhook_url and not dry_run:
+        print(
+            f"DISCORD_WEBHOOK_URL is not set. Put it in {DEFAULT_ENV_PATH} or run with --dry-run.",
+            file=sys.stderr,
+        )
+        return 2
+
+    if args.send_test:
+        sent_count = 0
+        for event in test_events(host):
+            if post_webhook(webhook_url, build_payload(event, host), dry_run):
+                sent_count += 1
+        print(f"sent {sent_count} test notification(s)")
+        return 0
+
+    while True:
+        try:
+            sent_count = poll_once(
+                codex_dir,
+                state_path,
+                webhook_url,
+                dry_run,
+                min_seconds,
+                host,
+                None if args.once else startup_ms,
+            )
+            if args.once:
+                print(f"sent {sent_count} notification(s)")
+                return 0
+        except KeyboardInterrupt:
+            return 130
+        except Exception as exc:
+            print(f"poll failed: {exc}", file=sys.stderr)
+            if args.once:
+                return 1
+        time.sleep(poll_seconds)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
