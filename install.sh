@@ -42,8 +42,10 @@ echo "  DISCORD_WEBHOOK_URL=\"https://discord.com/api/webhooks/...\""
 echo "  CODEX_NOTIFY_MIN_SECONDS=3"
 echo "  CODEX_NOTIFY_POLL_SECONDS=2"
 echo "  CODEX_NOTIFY_HOST=\"$(hostname)\""
+echo "  CODEX_NOTIFY_MENTION=\"@here\""
 echo
 echo "Tip: Webhooks post to a channel, not a DM. Use a private channel if you want personal notifications."
+echo "Tip: The default @here mention is intended for a private channel. Set CODEX_NOTIFY_MENTION=\"\" to disable pings."
 echo
 echo "Next steps:"
 echo "  1. Edit $CONFIG_DIR/env"

@@ -73,7 +73,7 @@ def test_rollout_task_complete_is_turn_scoped():
         path.unlink(missing_ok=True)
 
 
-def test_payload_disables_mentions():
+def test_payload_mentions_here_only():
     payload = notifier["build_payload"](
         {
             "kind": "turn_waiting",
@@ -89,13 +89,35 @@ def test_payload_disables_mentions():
         },
         "host",
     )
-    assert payload["allowed_mentions"] == {"parse": []}
+    assert payload["content"] == "@here"
+    assert payload["allowed_mentions"] == {"parse": ["everyone"]}
     assert payload["embeds"][0]["title"] == "Codex is waiting for you"
+
+
+def test_payload_can_disable_mentions():
+    payload = notifier["build_payload"](
+        {
+            "kind": "turn",
+            "status": "completed",
+            "thread_id": "thread",
+            "turn_id": "turn",
+            "title": "test",
+            "cwd": "/tmp",
+            "model": "test",
+            "duration_seconds": 3,
+            "finished_at": 1,
+        },
+        "host",
+        "",
+    )
+    assert "content" not in payload
+    assert payload["allowed_mentions"] == {"parse": []}
 
 
 if __name__ == "__main__":
     test_uuid7_ms()
     test_waiting_detection()
     test_rollout_task_complete_is_turn_scoped()
-    test_payload_disables_mentions()
+    test_payload_mentions_here_only()
+    test_payload_can_disable_mentions()
     print("tests passed")

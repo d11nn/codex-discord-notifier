@@ -60,6 +60,13 @@ def env_int(name: str, default: int) -> int:
         return default
 
 
+def env_str(name: str, default: str) -> str:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip()
+
+
 def sqlite_ro(path: Path) -> sqlite3.Connection:
     con = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=1.0)
     con.row_factory = sqlite3.Row
@@ -488,7 +495,17 @@ def prune_sent_keys(state: dict, keep: int = 500) -> None:
     state["sent_keys"] = dict(newest)
 
 
-def build_payload(event: dict, host: str) -> dict:
+def allowed_mentions_for(mention: str) -> dict:
+    if mention in {"@here", "@everyone"}:
+        return {"parse": ["everyone"]}
+    if re.fullmatch(r"<@!?\d+>", mention):
+        return {"parse": ["users"]}
+    if re.fullmatch(r"<@&\d+>", mention):
+        return {"parse": ["roles"]}
+    return {"parse": []}
+
+
+def build_payload(event: dict, host: str, mention: str = "@here") -> dict:
     duration = "unknown"
     if event.get("duration_seconds") is not None:
         duration = f"{event['duration_seconds']}s"
@@ -508,9 +525,9 @@ def build_payload(event: dict, host: str) -> dict:
     if event.get("assistant_excerpt"):
         fields.append({"name": "Assistant", "value": str(event["assistant_excerpt"])[:900], "inline": False})
 
-    return {
+    payload = {
         "username": "Codex Finish Notifier",
-        "allowed_mentions": {"parse": []},
+        "allowed_mentions": allowed_mentions_for(mention),
         "embeds": [
             {
                 "title": "Codex is waiting for you" if event.get("status") == "waiting_for_user" else "Codex job finished",
@@ -524,6 +541,9 @@ def build_payload(event: dict, host: str) -> dict:
             }
         ],
     }
+    if mention:
+        payload["content"] = mention
+    return payload
 
 
 def post_webhook(url: str, payload: dict, dry_run: bool) -> bool:
@@ -593,6 +613,7 @@ def poll_once(
     dry_run: bool,
     min_seconds: int,
     host: str,
+    mention: str = "@here",
     ignore_completed_before_ms: int | None = None,
 ) -> int:
     state = init_state_if_needed(codex_dir, state_path)
@@ -602,7 +623,7 @@ def poll_once(
 
     sent_count = 0
     for event in events:
-        payload = build_payload(event, host)
+        payload = build_payload(event, host, mention)
         if post_webhook(webhook_url, payload, dry_run):
             state.setdefault("sent_keys", {})[event["key"]] = int(time.time())
             sent_count += 1
@@ -630,6 +651,7 @@ def main() -> int:
     poll_seconds = max(1, env_int("CODEX_NOTIFY_POLL_SECONDS", 2))
     min_seconds = max(0, env_int("CODEX_NOTIFY_MIN_SECONDS", 5))
     host = os.environ.get("CODEX_NOTIFY_HOST") or socket.gethostname()
+    mention = env_str("CODEX_NOTIFY_MENTION", "@here")
     startup_ms = int(time.time() * 1000)
 
     if args.init_state:
@@ -647,7 +669,7 @@ def main() -> int:
     if args.send_test:
         sent_count = 0
         for event in test_events(host):
-            if post_webhook(webhook_url, build_payload(event, host), dry_run):
+            if post_webhook(webhook_url, build_payload(event, host, mention), dry_run):
                 sent_count += 1
         print(f"sent {sent_count} test notification(s)")
         return 0
@@ -661,6 +683,7 @@ def main() -> int:
                 dry_run,
                 min_seconds,
                 host,
+                mention,
                 None if args.once else startup_ms,
             )
             if args.once:

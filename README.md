@@ -69,6 +69,7 @@ DISCORD_WEBHOOK_URL="https://discord.com/api/webhooks/..."
 CODEX_NOTIFY_MIN_SECONDS=3
 CODEX_NOTIFY_POLL_SECONDS=2
 CODEX_NOTIFY_HOST="VM1"
+CODEX_NOTIFY_MENTION="@here"
 ```
 
 Start the notifier:
@@ -193,6 +194,7 @@ Supported settings:
 | `CODEX_NOTIFY_MIN_SECONDS` | `3` | Notify completed turns/jobs that ran at least this long. |
 | `CODEX_NOTIFY_POLL_SECONDS` | `2` | Poll interval for local Codex SQLite/log state. |
 | `CODEX_NOTIFY_HOST` | hostname | Display name in Discord notification fields. |
+| `CODEX_NOTIFY_MENTION` | `@here` | Plain message mention. Use `@here` in a private channel, `<@USER_ID>` for one user, `<@&ROLE_ID>` for a role, or empty string to disable pings. |
 | `CODEX_NOTIFY_CODEX_DIR` | `~/.codex` | Codex state directory. |
 | `CODEX_NOTIFY_STATE_PATH` | `~/.local/state/codex-discord-notifier/state.json` | Notifier state file. |
 | `CODEX_NOTIFY_DRY_RUN` | unset | Set to `1` to print payloads instead of sending. |
@@ -255,13 +257,23 @@ Do not:
 - paste the webhook URL into public issues or PRs
 - include full Codex output in Discord notifications
 
-The notifier sets:
+The notifier sends `CODEX_NOTIFY_MENTION` in the plain message content. By default this is `@here`, which works well when the webhook posts into a private channel that only you use.
+
+Discord webhooks cannot automatically mention the webhook creator. If you need an exact user mention instead of `@here`, set `CODEX_NOTIFY_MENTION="<@USER_ID>"`.
+
+The notifier also sets `allowed_mentions` narrowly. Assistant text inside the embed cannot create surprise pings.
+
+When `CODEX_NOTIFY_MENTION="@here"`, the payload uses:
+
+```json
+{"content": "@here", "allowed_mentions": {"parse": ["everyone"]}}
+```
+
+Set `CODEX_NOTIFY_MENTION=""` to disable all pings:
 
 ```json
 {"allowed_mentions": {"parse": []}}
 ```
-
-This prevents accidental `@everyone` or user mention pings from assistant text.
 
 ## Operations
 
