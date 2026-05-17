@@ -17,5 +17,14 @@ make test
 make smoke
 ```
 
-Do not add a runtime dependency unless it removes a real production risk.
+Use Conventional Commits for commit messages:
 
+- `feat: add a user-visible capability`
+- `fix: correct broken behavior`
+- `docs: update documentation`
+- `ci: update automation`
+- `chore: maintain repository metadata`
+
+The CI workflow uses these messages to choose the next semantic version tag on `main`.
+
+Do not add a runtime dependency unless it removes a real production risk.

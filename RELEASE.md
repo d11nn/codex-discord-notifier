@@ -13,12 +13,13 @@
    git grep -n "discord.com/api/webhooks" -- ':!env.example'
    ```
 
-3. Tag the release:
+3. Merge to `main` with Conventional Commits.
 
-   ```bash
-   git tag -a v0.1.0 -m "v0.1.0"
-   git push origin v0.1.0
-   ```
+   CI creates the next semantic version tag automatically after tests pass:
+
+   - `feat:` creates a minor release.
+   - `fix:`, `docs:`, `ci:`, `test:`, `refactor:`, and `chore:` create a patch release.
+   - `!` or `BREAKING CHANGE:` creates a major release.
 
 4. Create GitHub release notes covering:
 
