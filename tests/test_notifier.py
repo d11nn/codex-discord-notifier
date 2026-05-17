@@ -21,14 +21,6 @@ def test_startup_guard_uses_completion_time():
     assert not notifier["completed_before_startup"](1_000, None)
 
 
-def test_stale_turn_event():
-    latest = {"thread-a": (20, "turn-new")}
-    assert notifier["stale_turn_event"](10, "thread-a", "turn-old", latest)
-    assert not notifier["stale_turn_event"](20, "thread-a", "turn-new", latest)
-    assert not notifier["stale_turn_event"](10, "thread-b", "turn-old", latest)
-    assert not notifier["stale_turn_event"](10, "thread-a", None, latest)
-
-
 def test_waiting_detection():
     assert notifier["looks_waiting_for_user"]("Please confirm: did you receive the notification?")
     assert notifier["looks_waiting_for_user"]("Question: choose one.")

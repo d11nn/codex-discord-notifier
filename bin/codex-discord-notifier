@@ -103,16 +103,6 @@ def completed_before_startup(finished_ms: int, startup_ms: int | None) -> bool:
     return startup_ms is not None and finished_ms < startup_ms
 
 
-def stale_turn_event(row_id: int, thread_id: str | None, turn_id: str | None, latest_turn_by_thread: dict) -> bool:
-    if not thread_id or not turn_id:
-        return False
-    latest = latest_turn_by_thread.get(thread_id)
-    if not latest:
-        return False
-    latest_row_id, latest_turn_id = latest
-    return latest_row_id > row_id and latest_turn_id != turn_id
-
-
 def iso_utc(epoch_seconds: int | float | None) -> str:
     if epoch_seconds is None:
         return "unknown"
@@ -307,10 +297,6 @@ def collect_turn_events(
                 "  (target = 'codex_otel.trace_safe' "
                 "   and feedback_log_body like '%event.kind=response.completed%' "
                 "   and feedback_log_body like '%success=\"true\"%')"
-                "  or "
-                "  (target = 'codex_otel.trace_safe' "
-                "   and feedback_log_body like '%submission_dispatch%' "
-                "   and feedback_log_body like '%turn.id=%')"
                 ") "
                 "order by id asc",
                 (last_log_id,),
@@ -318,13 +304,6 @@ def collect_turn_events(
     except sqlite3.Error as exc:
         print(f"sqlite logs read failed: {exc}", file=sys.stderr)
         return []
-
-    latest_turn_by_thread = {}
-    for row in rows:
-        body = row["feedback_log_body"] or ""
-        turn_match = TURN_ID_RE.search(body)
-        if turn_match and row["thread_id"]:
-            latest_turn_by_thread[row["thread_id"]] = (int(row["id"]), turn_match.group(1))
 
     for row in rows:
         max_seen = max(max_seen, int(row["id"]))
@@ -340,9 +319,6 @@ def collect_turn_events(
             if phase in {"final", "final_answer"}:
                 last_final_text_by_turn[turn_key] = text
                 if key not in state.get("sent_keys", {}) and key not in emitted_keys:
-                    if stale_turn_event(int(row["id"]), thread_id, turn_id, latest_turn_by_thread):
-                        continue
-
                     info = fetch_thread_info(state_db, thread_id)
                     if should_ignore_thread(info, body):
                         continue
@@ -387,8 +363,6 @@ def collect_turn_events(
             continue
 
         if key in state.get("sent_keys", {}) or key in emitted_keys:
-            continue
-        if stale_turn_event(int(row["id"]), thread_id, turn_id, latest_turn_by_thread):
             continue
 
         finished_ms = int(row["ts"]) * 1000
